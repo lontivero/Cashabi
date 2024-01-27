@@ -73,6 +73,9 @@ module WabiSabi =
                 Utils.createInstance<RealCredentialsRequest> ([|delta; presented; requested; proofs|] : obj[])
             )
 
+        let deserializeCredentialRequest =
+            Decode.fromString credentialsRequest
+
         let issuanceValidationData :  Decoder<IssuanceValidationData> =
             Decode.object (fun get ->
                 let ma = get.Required.Field "ma" ge
@@ -177,6 +180,21 @@ module WabiSabi =
                 "r", scalar x.Randomness
                 "v", Encode.int64 x.Value
             ]
+
+    module CredentialRequest =
+        let deserialize =
+            Decode.fromString Decode.credentialsRequest
+
+        let serialize =
+            Encode.credentialsRequest >> Encode.toCanonicalForm
+
+    module CredentialResponse =
+        let serialize =
+            Encode.credentialsResponse >> Encode.toCanonicalForm
+
+    module CredentialIssuerParameters =
+        let serialize =
+            Encode.issuerParameters >> Encode.toCanonicalForm
 
     module Test =
         let testIt () =

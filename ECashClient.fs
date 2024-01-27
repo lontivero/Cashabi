@@ -20,21 +20,16 @@ module ECashClient =
     [<Literal>]
     let DIRECT_MESSAGE_SUBSCRIPTION = "direct messages"
 
-    let subscribeToAnnouncements (subscribeTo) =
-        let filter =
-            Filter.all
-            |> Filter.notes
-            |> Filter.authors [minterPubKey]
-            |> Filter.limit 1
-        subscribeTo MINT_ANNOUNCEMENTS_SUBSCRIPTION [filter]
+    let announcementsFilter =
+        Filter.all
+        |> Filter.notes
+        |> Filter.authors [minterPubKey]
+        |> Filter.limit 1
 
-    let subscribeToDirectMessages subscribeTo me =
-        let filter =
-            Filter.all
-            |> Filter.encryptedMessages
-            |> fun f -> { f with PubKeys = [me] }
-        subscribeTo DIRECT_MESSAGE_SUBSCRIPTION [filter]
-
+    let directMessagesFilter me =
+        Filter.all
+        |> Filter.encryptedMessages
+        |> fun f -> { f with PubKeys = [me] }
 
     type ReadyState = {
         Credentials: Credential list
@@ -99,8 +94,7 @@ module ECashClient =
                                 let c1, c2 = newCredentials[0], newCredentials[1]
                                 let receivedAmount = c1.Value + c2.Value
                                 let curBalance = waitingMoneyState.Credentials |>  Seq.sumBy (fun x -> x.Value)
-                                Console.ForegroundColor <- ConsoleColor.Green
-                                Console.WriteLine $"Received {receivedAmount}. New balance: {curBalance + receivedAmount}"
+                                log $"Received {receivedAmount}. New balance: {curBalance + receivedAmount}"
                                 Ready {
                                     Client = waitingMoneyState.Client
                                     Credentials = c1 :: c2 :: waitingMoneyState.Credentials
@@ -117,7 +111,7 @@ module ECashClient =
                                 sendTo (waitingMoneyState.Destination) paymentJson
                                 let credentials = credChange :: waitingMoneyState.Credentials
 
-                                Console.WriteLine $"Sent {credFormPayment.Value}. New balance: {credentials |> List.sumBy (fun x -> x.Value)}"
+                                log $"Sent {credFormPayment.Value}. New balance: {credentials |> List.sumBy (fun x -> x.Value)}"
 
                                 Ready {
                                     Client = waitingMoneyState.Client
@@ -129,8 +123,7 @@ module ECashClient =
                             | Ready readyState ->
                                 let receivedAmount = credential.Value
                                 let curBalance = readyState.Credentials |>  Seq.sumBy (_.Value)
-                                Console.ForegroundColor <- ConsoleColor.Green
-                                Console.WriteLine $"Received {receivedAmount}. New balance: {curBalance + receivedAmount}"
+                                log $"Received {receivedAmount}. New balance: {curBalance + receivedAmount}"
                                 Ready {
                                     Client = readyState.Client
                                     Credentials = credential :: readyState.Credentials
@@ -140,14 +133,12 @@ module ECashClient =
                             match state with
                             | Ready readyState ->
                                 let credentialsToUse, unSelectedCredential = getUsableCredentials (readyState.Credentials)
-                                let amount = credentialsToUse |> Seq.sumBy (fun x -> x.Value)
+                                let amount = credentialsToUse |> Seq.sumBy (_.Value)
                                 let credentialsRequest = readyState.Client.CreateRequest ([amount; 0], credentialsToUse, CancellationToken.None)
-                                let requestJson =
-                                    credentialsRequest.CredentialsRequest
-                                    |> Encode.credentialsRequest
-                                    |> Encode.toString 0
-                                Console.WriteLine "Consolidating..."
-                                sendToMinter requestJson
+                                credentialsRequest.CredentialsRequest
+                                |> CredentialRequest.serialize
+                                |> sendToMinter
+                                log "Consolidating..."
                                 WaitingMoney {
                                     Client = readyState.Client
                                     Credentials = unSelectedCredential
@@ -160,11 +151,9 @@ module ECashClient =
                                 let credentialsToUse, unSelectedCredential = getUsableCredentials (readyState.Credentials)
                                 let availableAmount = credentialsToUse |> Seq.sumBy (_.Value)
                                 let credentialsRequest = readyState.Client.CreateRequest ([amount; availableAmount - amount], credentialsToUse, CancellationToken.None)
-                                let requestJson =
-                                    credentialsRequest.CredentialsRequest
-                                    |> Encode.credentialsRequest
-                                    |> Encode.toString 0
-                                sendToMinter requestJson
+                                credentialsRequest.CredentialsRequest
+                                |> CredentialRequest.serialize
+                                |> sendToMinter
                                 WaitingMoneyForPayment {
                                     Client = readyState.Client
                                     Credentials = unSelectedCredential
@@ -175,14 +164,12 @@ module ECashClient =
                         | UserMessage (Buy amount) ->
                             match state with
                             | Ready readyState ->
-                                let credentialsToUse = readyState.Credentials |> List.filter (fun x -> x.Value = 0) |> List.take ProtocolConstants.CredentialNumber
-                                let unSelectedCredentials = readyState.Credentials |> List.except credentialsToUse
-                                let credentialsRequest = readyState.Client.CreateRequest ([amount; 0], credentialsToUse, CancellationToken.None)
-                                let requestJson =
-                                    credentialsRequest.CredentialsRequest
-                                    |> Encode.credentialsRequest
-                                    |> Encode.toString 0
-                                sendToMinter requestJson
+                                let nullCredentialsToUse = readyState.Credentials |> List.filter (fun x -> x.Value = 0) |> List.take ProtocolConstants.CredentialNumber
+                                let unSelectedCredentials = readyState.Credentials |> List.except nullCredentialsToUse
+                                let credentialsRequest = readyState.Client.CreateRequest ([amount; 0], nullCredentialsToUse, CancellationToken.None)
+                                credentialsRequest.CredentialsRequest
+                                |> CredentialRequest.serialize
+                                |> sendToMinter
                                 WaitingMoney {
                                     Client = readyState.Client
                                     Credentials = unSelectedCredentials
@@ -226,35 +213,32 @@ module ECashClient =
         |> Event.decryptDirectMessage secret
         |> Decode.fromString Decode.credential
 
-
     let dispatchProtocolHandler secret pushToProtocolHandler =
         commonProtocolHandler
             (fun subscriptionId event ->
-                let (AuthorId from) = event.PubKey
-                let (AuthorId minter) = minterPubKey
-                let fromMinter = Utils.toHex(from.ToBytes()) = Utils.toHex(minter.ToBytes())
                 match subscriptionId with
                 | MINT_ANNOUNCEMENTS_SUBSCRIPTION ->
                     match processMinterAnnouncement event with
                     | Ok minterParameters ->
                         pushToProtocolHandler (MinterMessage (MintParametersAnnouncement minterParameters))
                         pushToProtocolHandler (UserMessage GetNullCredentials)
-                    | Error e -> Console.WriteLine "Announcement was invalid"
+                    | Error e -> log "Announcement was invalid"
                 | DIRECT_MESSAGE_SUBSCRIPTION ->
+                    let fromMinter = AuthorId.equals event.PubKey minterPubKey
                     if fromMinter then
                         match processMinterDirectMessage secret event with
                         | Ok issuanceResponse ->
                             pushToProtocolHandler (MinterMessage (NewCredentialsMinted issuanceResponse))
                             pushToProtocolHandler (UserMessage GetNullCredentials)
-                        | Error e -> Console.WriteLine e
+                        | Error e -> log e
                     else
                         match processPaymentDirectMessage secret event with
                         | Ok credential ->
                             pushToProtocolHandler (PayerMessage (NewPaymentReceived credential))
                             pushToProtocolHandler (UserMessage (ConsolidateCredential))
                             pushToProtocolHandler (UserMessage GetNullCredentials)
-                        | Error e -> Console.WriteLine e
-                | _ -> Console.WriteLine "The relay is crazy or what!?")
+                        | Error e -> log e
+                | _ -> log "The relay is crazy or what!?")
 
     let processUserCommandLoop pushToProtocolHandler =
         let rec loop () = async {
@@ -267,22 +251,34 @@ module ECashClient =
                 match success, amount, maybePubkey with
                 | true, amount, Some pubkey ->
                     pushToProtocolHandler (UserMessage (SendTo (amount, pubkey)))
-                    Console.WriteLine "Done"
+                    log "Done"
                 | false, _, _ ->
-                    Console.WriteLine "The amount is not a valid integer"
+                    log "The amount is not a valid integer"
                 | _ ->
-                    Console.WriteLine "public key is invalid"
+                    log "public key is invalid"
             | [| "buy"; amountStr |] ->
                 match Int32.TryParse amountStr with
                 | true, amount ->
                     pushToProtocolHandler (UserMessage (Buy amount))
-                    Console.WriteLine $"Bought amount sabis from minter"
+                    log $"Bought amount sabis from minter"
                 | _ ->
-                    Console.WriteLine "The amount is not a valid integer"
+                    log "The amount is not a valid integer"
             | [||] ->
-                Console.WriteLine ()
+                log ""
             | _ ->
-                Console.WriteLine "?"
+                log "?"
             do! loop ()
         }
         loop ()
+
+    let start uri secret pubkey = async {
+        let! relay = connectToRelay uri
+        let protocolHandlerPush = protocolHandlerLoop secret relay.publish
+        let handleProtocolMessages = dispatchProtocolHandler secret protocolHandlerPush
+        let readCommandFromUserLoop = processUserCommandLoop protocolHandlerPush
+        let protocolHandlingLoop = relay.startListening handleProtocolMessages
+        relay.subscribe MINT_ANNOUNCEMENTS_SUBSCRIPTION [announcementsFilter]
+        relay.subscribe DIRECT_MESSAGE_SUBSCRIPTION [directMessagesFilter pubkey]
+
+        do! (Async.Parallel [ protocolHandlingLoop; readCommandFromUserLoop ] |> Async.Ignore)
+    }

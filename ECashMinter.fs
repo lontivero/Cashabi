@@ -1,9 +1,7 @@
 namespace Nostra.Client
 
-open System
 open Nostra
 open Nostra.Client.Request
-open Thoth.Json.Net
 open WabiSabi.Crypto
 open WabiSabi.Crypto.Randomness
 
@@ -20,42 +18,47 @@ module ECashMinter =
     let issuerKey = CredentialIssuerSecretKey(rnd)
     let issuer = CredentialIssuer(issuerKey, rnd, maxAmount)
 
-    let subscribeToDirectMessagesToMinter subscribeTo =
-        let filter =
-            Filter.all
-            |> Filter.encryptedMessages
-            //|> Filter.since DateTime.UtcNow
-            |> fun f -> { f with PubKeys = [minterPubKey] }
-        subscribeTo DIRECT_MESSAGE_SUBSCRIPTION [filter]
+    let filterDirectMessagesToMinter =
+        Filter.all
+        |> Filter.encryptedMessages
+        //|> Filter.since DateTime.UtcNow
+        |> fun f -> { f with PubKeys = [minterPubKey] }
 
-    let announceParameters send secret =
-        let parameters = issuerKey.ComputeCredentialIssuerParameters()
-        let announcementEvent =
-            parameters
-            |> Encode.issuerParameters
-            |> Encode.toString 0
-            |> Event.createNote
-            |> Event.sign secret
+    let announceParameters secret =
+        issuerKey.ComputeCredentialIssuerParameters()
+        |> CredentialIssuerParameters.serialize
+        |> Event.createNote
+        |> Event.sign secret
 
-        send announcementEvent
+    let eventHandler publishToRelay secret subscriptionId event =
+        if subscriptionId = DIRECT_MESSAGE_SUBSCRIPTION then
+            event
+            |> Event.decryptDirectMessage secret
+            |> CredentialRequest.deserialize
+            |> function
+            | Ok credentialsRequest ->
+                log "Credential request received"
+                credentialsRequest
+                |> issuer.HandleRequest
+                |> CredentialResponse.serialize
+                |> sayTo publishToRelay secret event.PubKey
+                log $"New issued credentials sent back to requester ${credentialsRequest.Delta}"
+            | Error _ ->
+                log "Announcement was invalid"
+        else
+            log "The relay is crazy or what!?"
 
-    let dispatchProtocolHandler relay secret =
-        commonProtocolHandler
-            (fun subscriptionId event ->
-                match subscriptionId with
-                | DIRECT_MESSAGE_SUBSCRIPTION ->
-                    let issuanceRequestResult =
-                        event
-                        |> Event.decryptDirectMessage secret
-                        |> Decode.fromString Decode.credentialsRequest
-                    match issuanceRequestResult with
-                    | Ok credentialsRequest ->
-                        Console.WriteLine "Credential request received"
-                        let credentialsResponseJson =
-                            issuer.HandleRequest credentialsRequest
-                            |> Encode.credentialsResponse
-                            |> Encode.toString 0
-                        sayTo relay secret event.PubKey credentialsResponseJson
-                        Console.WriteLine $"New issued credentials sent back to requester ${credentialsRequest.Delta}"
-                    | Error e -> Console.WriteLine "Announcement was invalid"
-                | _ -> Console.WriteLine "The relay is crazy or what!?")
+    let dispatchProtocolHandler publishToRelay secret =
+        commonProtocolHandler (eventHandler publishToRelay secret)
+
+    let start uri secret = async {
+        let! relay = connectToRelay uri
+        relay.subscribe DIRECT_MESSAGE_SUBSCRIPTION [filterDirectMessagesToMinter]
+
+        relay.publish (announceParameters secret)
+        let handleProtocolMessages = dispatchProtocolHandler relay.publish secret
+        let protocolHandlingLoop = relay.startListening handleProtocolMessages
+
+        do! protocolHandlingLoop
+    }
+

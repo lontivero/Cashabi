@@ -50,20 +50,19 @@ module Common =
             | Ok pubkey -> pubkey
             | _ -> failwith "That's not valid xonlypubkey"
 
+    let log (str: string) =
+        Console.WriteLine str
+
     let commonProtocolHandler eventsHandler = function
         | Ok (Response.RMEvent (subscriptionId, event)) ->
             eventsHandler subscriptionId event
         | Ok (Response.RMACK(eventId, success, message)) ->
-            Console.ForegroundColor <- ConsoleColor.Green
             let (EventId eid) = eventId
-            Console.WriteLine $"Event: {eid |> Utils.toHex} Success: {success} = {message}"
+            log $"Event: {eid |> Utils.toHex} Success: {success} = {message}"
         | Ok (Response.RMNotice message) ->
-            Console.ForegroundColor <- ConsoleColor.Yellow
-            Console.WriteLine message
+            log message
         | Ok (Response.RMEOSE subscriptionId) ->
-            Console.ForegroundColor <- ConsoleColor.DarkGray
-            Console.WriteLine $">>> {subscriptionId} Done"
+            log $">>> {subscriptionId} Done"
         | Error e ->
-            Console.ForegroundColor <- ConsoleColor.Red
-            Console.WriteLine (e.ToString())
+            log (e.ToString())
 
